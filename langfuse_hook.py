@@ -244,10 +244,16 @@ def get_all_blocks_chronological(msg: dict) -> list:
             if text.strip():
                 # Detect thinking content embedded in text blocks with <thinking> tags
                 if text.strip().startswith("<thinking>"):
-                    # Extract content between tags
-                    thinking_content = text.strip()
-                    thinking_content = thinking_content.removeprefix("<thinking>").removesuffix("</thinking>").strip()
-                    blocks.append({"kind": "thinking", "content": thinking_content[:3000]})
+                    # Split on </thinking> to separate thinking from subsequent text
+                    parts = text.strip().split("</thinking>", 1)
+                    thinking_content = parts[0].removeprefix("<thinking>").strip()
+                    if thinking_content:
+                        blocks.append({"kind": "thinking", "content": thinking_content[:3000]})
+                    # Remaining text after </thinking>
+                    if len(parts) > 1:
+                        remaining = parts[1].strip()
+                        if remaining:
+                            blocks.append({"kind": "text", "content": remaining[:3000]})
                 else:
                     blocks.append({"kind": "text", "content": text[:3000]})
         elif block_type == "tool_use":
