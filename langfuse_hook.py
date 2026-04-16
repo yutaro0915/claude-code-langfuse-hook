@@ -818,6 +818,18 @@ def main():
     current_cwd = hook_input.get("cwd", "")
     debug(f"Current cwd: {current_cwd}")
 
+    # Load env from project's .claude/settings.local.json if available
+    if current_cwd:
+        local_settings = Path(current_cwd) / ".claude" / "settings.local.json"
+        if local_settings.exists():
+            try:
+                local_env = json.loads(local_settings.read_text()).get("env", {})
+                for k, v in local_env.items():
+                    os.environ[k] = v
+                debug(f"Loaded {len(local_env)} env vars from {local_settings}")
+            except (json.JSONDecodeError, IOError) as e:
+                debug(f"Failed to load local settings: {e}")
+
     # Check if tracing is enabled
     if os.environ.get("TRACE_TO_LANGFUSE", "").lower() != "true":
         debug("Tracing disabled (TRACE_TO_LANGFUSE != true)")
@@ -827,6 +839,8 @@ def main():
     public_key = os.environ.get("CC_LANGFUSE_PUBLIC_KEY") or os.environ.get("LANGFUSE_PUBLIC_KEY")
     secret_key = os.environ.get("CC_LANGFUSE_SECRET_KEY") or os.environ.get("LANGFUSE_SECRET_KEY")
     host = os.environ.get("CC_LANGFUSE_HOST") or os.environ.get("LANGFUSE_HOST", "https://cloud.langfuse.com")
+
+    log("DEBUG", f"Keys: pk={public_key[:15] if public_key else 'NONE'}..., host={host}")
 
     if not public_key or not secret_key:
         log("ERROR", "Langfuse API keys not set (CC_LANGFUSE_PUBLIC_KEY / CC_LANGFUSE_SECRET_KEY)")
