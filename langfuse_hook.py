@@ -596,8 +596,19 @@ def create_trace(
         },
     ) as trace_span:
         # Set session_id and tags on the underlying trace
+        # Get user identity from git config
+        import subprocess
+        try:
+            user_id = subprocess.run(
+                ["git", "config", "--global", "user.email"],
+                capture_output=True, text=True, timeout=2,
+            ).stdout.strip() or None
+        except Exception:
+            user_id = None
+
         langfuse.update_current_trace(
             session_id=session_id,
+            user_id=user_id,
             tags=tags,
             metadata={
                 "source": "claude-code",
