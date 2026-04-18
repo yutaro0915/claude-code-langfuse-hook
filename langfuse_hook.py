@@ -643,10 +643,14 @@ def create_trace(
             pass
 
         # Create spans for all blocks in chronological order
+        # Small sleep between spans to ensure distinct timestamps for UI ordering
+        import time as _time
         seq = 0
         for block in all_blocks:
             seq += 1
             kind = block["kind"]
+            if seq > 1:
+                _time.sleep(0.002)
 
             if kind == "thinking":
                 with langfuse.start_as_current_span(
