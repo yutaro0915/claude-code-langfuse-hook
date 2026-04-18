@@ -911,7 +911,12 @@ def main():
     # Load state
     state = load_state()
 
-    # Find modified transcripts - scope to current project only
+    # Find modified transcripts - scope to current session only
+    # 1 Claude Code session = 1 Langfuse session. The stdin session_id
+    # identifies the currently active transcript to process.
+    current_session_id = hook_input.get("session_id", "")
+    debug(f"Current session_id from stdin: {current_session_id}")
+
     modified_transcripts = find_modified_transcripts(state, max_sessions=10)
 
     if current_cwd:
@@ -921,6 +926,14 @@ def main():
             if project_dir_name in str(path)
         ]
         debug(f"Filtered to current project: {len(modified_transcripts)} transcript(s)")
+
+    # Further filter to only the active session from stdin
+    if current_session_id:
+        modified_transcripts = [
+            (sid, path, pname) for sid, path, pname in modified_transcripts
+            if sid == current_session_id
+        ]
+        debug(f"Filtered to current session: {len(modified_transcripts)} transcript(s)")
 
     if not modified_transcripts:
         debug("No modified transcripts found")
