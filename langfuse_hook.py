@@ -547,20 +547,31 @@ def create_trace(
         model = assistant_msgs[0]["message"].get("model", "claude")
 
     # Collect all blocks chronologically and match tool results
+    # Each tool_result_map entry carries both content and timestamp
     all_blocks = []
     tool_result_map = {}
     for tr in tool_results:
+        tr_ts = tr.get("timestamp")
         tr_content = get_content(tr)
         if isinstance(tr_content, list):
             for item in tr_content:
                 if isinstance(item, dict) and item.get("tool_use_id"):
-                    tool_result_map[item["tool_use_id"]] = item.get("content")
+                    tool_result_map[item["tool_use_id"]] = {
+                        "content": item.get("content"),
+                        "timestamp": tr_ts,
+                    }
 
     for assistant_msg in assistant_msgs:
+        msg_ts = assistant_msg.get("timestamp")
         blocks = get_all_blocks_chronological(assistant_msg)
         for block in blocks:
+            block["start_ts"] = msg_ts  # when the assistant emitted this block
             if block["kind"] == "tool_use":
-                block["output"] = tool_result_map.get(block.get("id"))
+                tr_info = tool_result_map.get(block.get("id"), {})
+                block["output"] = tr_info.get("content")
+                block["end_ts"] = tr_info.get("timestamp") or msg_ts
+            else:
+                block["end_ts"] = msg_ts  # instantaneous for thinking/text
             all_blocks.append(block)
 
     # Also collect tool calls for backward compat metadata
@@ -642,45 +653,81 @@ def create_trace(
         ):
             pass
 
-        # Create spans for all blocks in chronological order
-        # Small sleep between spans to ensure distinct timestamps for UI ordering
-        import time as _time
+        # Create spans for all blocks with explicit timestamps from transcript.
+        # We use the OpenTelemetry tracer directly so we can set start_time and
+        # end_time precisely; the Langfuse high-level API does not expose these.
+        from opentelemetry import trace as _otel_trace
+        from langfuse._client.attributes import LangfuseOtelSpanAttributes as _LA
+
+        _tracer = _otel_trace.get_tracer("claude-code-langfuse-hook")
+
+        def _iso_to_ns(iso_str):
+            if not iso_str:
+                return None
+            try:
+                s = iso_str[:-1] + "+00:00" if iso_str.endswith("Z") else iso_str
+                return int(datetime.fromisoformat(s).timestamp() * 1_000_000_000)
+            except (ValueError, AttributeError, TypeError):
+                return None
+
         seq = 0
         for block in all_blocks:
             seq += 1
             kind = block["kind"]
-            if seq > 1:
-                _time.sleep(0.002)
+
+            start_ns = _iso_to_ns(block.get("start_ts"))
+            end_ns = _iso_to_ns(block.get("end_ts"))
+            # Ensure end >= start, and add a small offset for ordering
+            # when events share a millisecond-level timestamp.
+            if start_ns is not None and end_ns is not None and end_ns < start_ns:
+                end_ns = start_ns
+            if start_ns is not None:
+                # Add seq microseconds to disambiguate simultaneous events
+                start_ns += seq * 1000
+                if end_ns is not None and end_ns < start_ns:
+                    end_ns = start_ns
 
             if kind == "thinking":
-                with langfuse.start_as_current_span(
-                    name=f"{seq:02d} Thinking",
-                    metadata={"block_type": "thinking", "seq": seq},
-                ) as span:
-                    span.update(output={"thinking": block["content"]})
-                debug(f"Created span for thinking block {seq}")
-
+                name = f"{seq:02d} Thinking"
+                output = {"thinking": block["content"]}
+                input_data = None
+                metadata = {"block_type": "thinking", "seq": seq}
             elif kind == "text":
-                with langfuse.start_as_current_span(
-                    name=f"{seq:02d} Text Output",
-                    metadata={"block_type": "text", "seq": seq},
-                ) as span:
-                    span.update(output={"text": block["content"]})
-                debug(f"Created span for text block {seq}")
-
+                name = f"{seq:02d} Text Output"
+                output = {"text": block["content"]}
+                input_data = None
+                metadata = {"block_type": "text", "seq": seq}
             elif kind == "tool_use":
-                with langfuse.start_as_current_span(
-                    name=f"{seq:02d} Tool: {block['name']}",
-                    input=block.get("input", {}),
-                    metadata={
-                        "block_type": "tool_use",
-                        "tool_name": block["name"],
-                        "tool_id": block.get("id", ""),
-                        "seq": seq,
-                    },
-                ) as tool_span:
-                    tool_span.update(output=block.get("output"))
-                debug(f"Created span for tool: {block['name']}")
+                name = f"{seq:02d} Tool: {block['name']}"
+                output = block.get("output")
+                input_data = block.get("input", {})
+                metadata = {
+                    "block_type": "tool_use",
+                    "tool_name": block["name"],
+                    "tool_id": block.get("id", ""),
+                    "seq": seq,
+                }
+            else:
+                continue
+
+            span_kwargs = {"name": name}
+            if start_ns is not None:
+                span_kwargs["start_time"] = start_ns
+
+            otel_span = _tracer.start_span(**span_kwargs)
+            try:
+                otel_span.set_attribute(_LA.OBSERVATION_TYPE, "span")
+                if input_data is not None:
+                    otel_span.set_attribute(_LA.OBSERVATION_INPUT, json.dumps(input_data, default=str, ensure_ascii=False))
+                if output is not None:
+                    otel_span.set_attribute(_LA.OBSERVATION_OUTPUT, json.dumps(output, default=str, ensure_ascii=False))
+                otel_span.set_attribute(_LA.OBSERVATION_METADATA, json.dumps(metadata, default=str, ensure_ascii=False))
+            finally:
+                if end_ns is not None:
+                    otel_span.end(end_time=end_ns)
+                else:
+                    otel_span.end()
+            debug(f"Created span {seq} ({kind}) start={start_ns} end={end_ns}")
 
         # Add permission governance data
         perm_events = get_permission_flags(session_id)
